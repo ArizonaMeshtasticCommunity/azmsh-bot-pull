@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Validate Discord posts in channels/ for PostsAsCode compatibility."""
+
+import os
+import re
+import sys
+from pathlib import Path
+
+MAX_CHARS = 2000
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MiB safe default for Discord bots
+TEXT_EXTS = {".md"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+SUPPORTED_EXTS = TEXT_EXTS | IMAGE_EXTS
+
+VAR_RE = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
+BAD_VAR_RE = re.compile(r"\{\{([^}]*)\}\}")
+PREFIX_RE = re.compile(r"^\d{2,}-")
+
+MAGIC_SIGNATURES = {
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+    ".webp": (b"RIFF",),
+}
+
+
+def has_unclosed_fence(text: str) -> bool:
+    fence_open = None
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            marker = stripped[:3]
+            if fence_open is None:
+                fence_open = marker
+            elif fence_open == marker:
+                fence_open = None
+    return fence_open is not None
+
+
+def main() -> int:
+    root = Path("channels")
+    if not root.is_dir():
+        print("::error::Missing channels/ directory.")
+        return 1
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    summary_rows: list[str] = []
+
+    for channel_dir in sorted(
+        p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
+    ):
+        entries = sorted(channel_dir.iterdir(), key=lambda p: (p.name.lower(), p.name))
+        valid_count = 0
+
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
+            rel = entry.as_posix()
+
+            if entry.is_dir():
+                warnings.append(
+                    f"{rel}: nested subdirectory will be ignored by posts_as_code "
+                    "(only direct files in mapped folders are posted)"
+                )
+                summary_rows.append(f"| `{rel}` | dir | — | — | ⚠️ Ignored subdir |")
+                continue
+
+            suffix = entry.suffix.lower()
+            if suffix not in SUPPORTED_EXTS:
+                errors.append(
+                    f"{rel}: unsupported file type `{suffix or '(none)'}` "
+                    f"(allowed: {', '.join(sorted(SUPPORTED_EXTS))})"
+                )
+                summary_rows.append(
+                    f"| `{rel}` | `{suffix}` | — | — | ❌ Unsupported type |"
+                )
+                continue
+
+            valid_count += 1
+            if not PREFIX_RE.match(entry.name):
+                warnings.append(
+                    f"{rel}: filename does not start with a zero-padded numeric prefix "
+                    "(e.g. `01-`) for predictable ordering"
+                )
+
+            if suffix in TEXT_EXTS:
+                try:
+                    raw = entry.read_text(encoding="utf-8")
+                except UnicodeDecodeError as exc:
+                    errors.append(f"{rel}: invalid UTF-8 ({exc})")
+                    summary_rows.append(
+                        f"| `{rel}` | `.md` | — | — | ❌ Invalid UTF-8 |"
+                    )
+                    continue
+
+                normalized = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+                if not normalized:
+                    errors.append(f"{rel}: markdown file is empty")
+                    summary_rows.append(f"| `{rel}` | `.md` | 0 chars | — | ❌ Empty |")
+                    continue
+
+                file_status = "✅ OK"
+                vars_found = sorted(set(VAR_RE.findall(normalized)))
+
+                for m in BAD_VAR_RE.finditer(normalized):
+                    inner = m.group(1)
+                    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", inner):
+                        errors.append(
+                            f"{rel}: malformed template placeholder `{{{{{inner}}}}}` "
+                            "(use letters, digits, underscores only)"
+                        )
+                        file_status = "❌ Bad placeholder"
+
+                if has_unclosed_fence(normalized):
+                    errors.append(f"{rel}: unclosed fenced code block (``` or ~~~)")
+                    file_status = "❌ Unclosed code block"
+
+                char_len = len(normalized)
+                if char_len > MAX_CHARS:
+                    warnings.append(
+                        f"{rel}: {char_len} chars exceeds Discord's {MAX_CHARS}-char bot limit "
+                        "(will prompt to split on sync)"
+                    )
+                    if file_status == "✅ OK":
+                        file_status = f"⚠️ >{MAX_CHARS} chars"
+
+                vars_col = ", ".join(f"`{v}`" for v in vars_found) if vars_found else "—"
+                summary_rows.append(
+                    f"| `{rel}` | `.md` | {char_len} chars | {vars_col} | {file_status} |"
+                )
+
+            elif suffix in IMAGE_EXTS:
+                size = entry.stat().st_size
+                size_kb = f"{size / 1024:.1f} KB"
+                if size == 0:
+                    errors.append(f"{rel}: image file is empty")
+                    summary_rows.append(
+                        f"| `{rel}` | `{suffix}` | 0 B | — | ❌ Empty |"
+                    )
+                    continue
+
+                header = entry.read_bytes()[:12]
+                sigs = MAGIC_SIGNATURES[suffix]
+                valid_magic = any(header.startswith(sig) for sig in sigs)
+                if suffix == ".webp" and header[8:12] != b"WEBP":
+                    valid_magic = False
+
+                if not valid_magic:
+                    errors.append(
+                        f"{rel}: file header does not match `{suffix}` image format"
+                    )
+                    summary_rows.append(
+                        f"| `{rel}` | `{suffix}` | {size_kb} | — | ❌ Invalid image |"
+                    )
+                    continue
+
+                if size > MAX_IMAGE_BYTES:
+                    errors.append(
+                        f"{rel}: {size / (1024 * 1024):.2f} MiB exceeds "
+                        f"{MAX_IMAGE_BYTES / (1024 * 1024):.0f} MiB Discord limit"
+                    )
+                    summary_rows.append(
+                        f"| `{rel}` | `{suffix}` | {size_kb} | — | ❌ Too large |"
+                    )
+                    continue
+
+                summary_rows.append(
+                    f"| `{rel}` | `{suffix}` | {size_kb} | — | ✅ OK |"
+                )
+
+        if valid_count == 0:
+            errors.append(f"{channel_dir.as_posix()}: channel folder contains no valid posts")
+
+    for w in warnings:
+        print(f"::warning::{w}")
+    for e in errors:
+        print(f"::error::{e}")
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        md = [
+            "## Discord Post Validation Summary",
+            "",
+            "| File | Type | Size / Length | Variables | Status |",
+            "|------|------|---------------|-----------|--------|",
+            *summary_rows,
+            "",
+            f"**Errors:** {len(errors)} | **Warnings:** {len(warnings)}",
+        ]
+        Path(summary_path).write_text("\n".join(md) + "\n", encoding="utf-8")
+
+    print(
+        f"Checked {len(summary_rows)} entries: {len(errors)} error(s), {len(warnings)} warning(s)."
+    )
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
