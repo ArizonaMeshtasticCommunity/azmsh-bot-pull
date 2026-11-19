@@ -1,0 +1,61 @@
+name: Validate Discord Posts
+
+on:
+  pull_request:
+    paths:
+      - "channels/**"
+
+jobs:
+  validate-posts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check markdown lengths and image sizes
+        run: |
+          python - << 'EOF'
+          import sys
+          from pathlib import Path
+
+          MAX_CHARS = 2000
+          MAX_IMAGE_BYTES = 8 * 1024 * 1024
+          IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+          root = Path("channels")
+          errors = []
+          warnings = []
+
+          for path in sorted(root.rglob("*")):
+              if not path.is_file() or path.name.startswith("."):
+                  continue
+              suffix = path.suffix.lower()
+              if suffix == ".md":
+                  text = path.read_text(encoding="utf-8").replace("\r\n", "\n").strip()
+                  if not text:
+                      errors.append(f"{path}: markdown file is empty")
+                  elif len(text) > MAX_CHARS:
+                      warnings.append(
+                          f"{path}: {len(text)} chars exceeds Discord's {MAX_CHARS}-char bot limit (will prompt to split on sync)"
+                      )
+              elif suffix in IMAGE_EXTS:
+                  size = path.stat().st_size
+                  if size == 0:
+                      errors.append(f"{path}: image file is empty")
+                  elif size > MAX_IMAGE_BYTES:
+                      errors.append(
+                          f"{path}: {size / (1024 * 1024):.2f} MiB exceeds {MAX_IMAGE_BYTES / (1024 * 1024):.0f} MiB limit"
+                      )
+
+          for w in warnings:
+              print(f"::warning::{w}")
+          for e in errors:
+              print(f"::error::{e}")
+
+          if errors:
+              sys.exit(1)
+          print("Validation complete.")
+          EOF
