@@ -1,0 +1,174 @@
+name: Discord PR Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pr-preview-gh-pages
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    name: Build & Publish Discord Preview
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Build preview HTML
+        if: github.event.action != 'closed'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 .github/scripts/build_pr_preview.py \
+            --repo . \
+            --base-ref "$BASE_SHA" \
+            --head-ref "$HEAD_SHA" \
+            --out-dir /tmp/pr-preview \
+            --pr-number "$PR_NUMBER" \
+            --pr-title "$PR_TITLE"
+
+      - name: Publish or clean up gh-pages preview
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ACTION: ${{ github.event.action }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          WORK=/tmp/gh-pages-work
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          cd "$WORK"
+
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch --depth 1 origin gh-pages
+            git checkout -B gh-pages FETCH_HEAD
+          else
+            git checkout --orphan gh-pages
+          fi
+
+          touch .nojekyll
+          rm -rf "pr-${PR_NUMBER}"
+
+          if [ "$ACTION" != "closed" ]; then
+            cp -R /tmp/pr-preview "pr-${PR_NUMBER}"
+          fi
+
+          python3 - << 'PY'
+          import html
+          from pathlib import Path
+
+          prs = sorted(
+              (p.name for p in Path(".").iterdir() if p.is_dir() and p.name.startswith("pr-")),
+              key=lambda n: int(n.split("-", 1)[1]) if n.split("-", 1)[1].isdigit() else 0,
+              reverse=True,
+          )
+          items = "".join(
+              f'<li><a href="./{html.escape(name)}/">PR #{html.escape(name.split("-", 1)[1])}</a></li>'
+              for name in prs
+          ) or "<li><em>No active PR previews.</em></li>"
+
+          Path("index.html").write_text(
+              f"""<!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>AZMSH Discord PR Previews</title>
+            <style>
+              body {{ font-family: system-ui, sans-serif; background: #1e1f22; color: #dbdee1; padding: 32px; }}
+              a {{ color: #00a8fc; text-decoration: none; }}
+              a:hover {{ text-decoration: underline; }}
+              li {{ margin: 8px 0; font-size: 16px; }}
+            </style>
+          </head>
+          <body>
+            <h1>AZMSH Discord PR Previews</h1>
+            <ul>{items}</ul>
+          </body>
+          </html>
+          """,
+              encoding="utf-8",
+          )
+          PY
+
+          git add -A
+          if ! git diff --cached --quiet; then
+            if [ "$ACTION" = "closed" ]; then
+              git commit -m "chore: remove preview for closed PR #${PR_NUMBER}"
+            else
+              git commit -m "chore: update Discord preview for PR #${PR_NUMBER}"
+            fi
+            git push origin gh-pages
+          fi
+
+      - name: Post or update PR preview comment
+        if: github.event.action != 'closed'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = JSON.parse(fs.readFileSync('/tmp/pr-preview/summary.json', 'utf8'));
+            const prNumber = context.payload.pull_request.number;
+            const owner = context.repo.owner.toLowerCase();
+            const repo = context.repo.repo;
+            const url = `https://${owner}.github.io/${repo}/pr-${prNumber}/`;
+
+            const rows = summary.channels.map(c => {
+              const s = c.stats;
+              const status = (s.added + s.modified + s.removed) > 0
+                ? `+${s.added} / ~${s.modified} / -${s.removed}`
+                : (s.moved_posts > 0 ? `reflowed (${s.moved_posts} blocks)` : 'unchanged');
+              return `| \`#${c.name}\` | ${status} |`;
+            }).join('\n');
+
+            const marker = '<!-- azmsh-pr-preview -->';
+            const body = [
+              marker,
+              '### Discord Channel Preview',
+              '',
+              `**Live side-by-side preview:** ${url}`,
+              '',
+              '| Channel | Changes |',
+              '|---------|---------|',
+              rows,
+              '',
+              `_Comparing \`${summary.base_sha}\` → \`${summary.head_sha}\`. Unchanged text moved across posts is marked as reflowed rather than changed._`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
