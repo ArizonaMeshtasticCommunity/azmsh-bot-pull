@@ -1,0 +1,17 @@
+# Stationary Nodes
+## Device (Settings > Device)  
+* **Node Info Broadcast Seconds**: **43200/12hours** (0 is default of 3 hours)  
+## Position (Settings > Position)  
+* **Smart Broadcast**: **OFF** (default is ON)  
+### If GPS is Enabled  
+* **Position Broadcast Interval**: **43200/12hours** (0 is default of 60 seconds / 1 hour)  
+* **GPS Update Interval**: **21600/6hours** (0 is default of 120 seconds / 2 minutes)  
+## Telemetry (Settings > Module Configuration > Telemetry) (If enabled)  
+* **Broadcast Device Metrics**: **3600/1hour** (0 is default of 1800 seconds / 30 minutes)  
+* **Device Metrics Update Interval**: **3600/1hour** (0 is default of 1800 seconds / 30 minutes)  
+* **Environment Metrics Update Interval**: **3600/1hour** (0 is default of 1800 seconds / 30 minutes)  
+* **Power Metrics Update Interval**: **3600/1hour** (0 is default of 1800 seconds / 30 minutes)  
+## MQTT (Settings > Module Configuration > MQTT)  
+* **Map Report Publish Interval**: **21600/6hours** (0 is default of 3600 seconds / 1 hour)
+## Neighbor Info (Settings > Module Configuration > Neighbor Info)
+* **Neighbor Info**: **39600/11hours** (Default is 14400 seconds / 4 hours)

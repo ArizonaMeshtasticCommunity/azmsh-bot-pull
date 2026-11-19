@@ -27,7 +27,7 @@ Credentials and Discord-only settings are stored in Redbot rather than committed
 | `{{MQTT_SERVER}}` | `channels/getting-started/03-mqtt-settings.md` |
 | `{{MQTT_USER}}` | `channels/getting-started/03-mqtt-settings.md` |
 | `{{MQTT_PASS}}` | `channels/getting-started/03-mqtt-settings.md` |
-| `{{GRAFANA_PASS}}` | `channels/getting-started/05-community-links.md` |
+| `{{GRAFANA_PASS}}` | `channels/getting-started/06-community-links.md` |
 
 ## Bot Setup Commands
 
