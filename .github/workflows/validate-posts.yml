@@ -1,11 +1,9 @@
 name: Validate Discord Posts
 
 on:
+  # No paths filter: "Discord Post Checks" is a required check on main,
+  # so it has to report on every PR or non-channel PRs could never merge.
   pull_request:
-    paths:
-      - "channels/**"
-      - ".github/workflows/validate-posts.yml"
-      - ".github/scripts/validate_posts.py"
   push:
     branches: [main]
     paths:
